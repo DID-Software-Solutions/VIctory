@@ -132,12 +132,17 @@ extern "system" fn execute(_: This, count: u32, lists: *const This) {
     }
 }
 
-/// The start of a present plane: frame token, then the plane's resources.
+/// A present plane (72 bytes): frame token, the plane's resources, and per
+/// resource its source rectangle in texels and its place on the screen as
+/// fractions (left, top, right, bottom; either may be absent: all of it).
 #[repr(C)]
 pub(crate) struct Plane {
     token: u64,
     count: u32,
     resources: *const This,
+    source: *const [i32; 4],
+    screen: *const [f32; 4],
+    _rest: [u64; 4],
 }
 /// Submission tagged with the frame it belongs to `(count, lists, frame
 /// token, flags)`; frames are paced elsewhere, so it runs as a plain one.
@@ -280,22 +285,45 @@ extern "system" fn present(
     }
     #[cfg(windows)]
     if planes > 0
-        // SAFETY: the title passes `planes` plane descriptions.
-        && let Some(plane) = unsafe { plane_parameters.as_ref() }
-        && plane.count > 0
-        && !plane.resources.is_null()
-        // SAFETY: the plane lists `count` resources.
-        && let resource = unsafe { *plane.resources }
-        && let Some(texture) = crate::resource::host_resource(resource)
+        && !plane_parameters.is_null()
         && let Some(host) = crate::host::host()
     {
         const COPY_SOURCE: u32 = 0x800;
-        let state = crate::resource::host_transition(resource, COPY_SOURCE)
-            .map_or(COPY_SOURCE, |(_, before)| before);
-        let shown = host.present(texture, state, frame);
-        crate::resource::host_transition(resource, state);
+        // SAFETY: the title passes `planes` plane descriptions.
+        let all = unsafe { std::slice::from_raw_parts(plane_parameters, planes as usize) };
+        let mut layers = Vec::new();
+        let mut presented = Vec::new();
+        for plane in all {
+            if plane.count == 0 || plane.resources.is_null() {
+                continue;
+            }
+            // SAFETY: the plane lists `count` resources.
+            let resource = unsafe { *plane.resources };
+            let Some(texture) = crate::resource::host_resource(resource) else {
+                continue;
+            };
+            let state = crate::resource::host_transition(resource, COPY_SOURCE)
+                .map_or(COPY_SOURCE, |(_, before)| before);
+            // SAFETY: a live resource.
+            let desc = unsafe { texture.GetDesc() };
+            let (width, height) = (desc.Width as f32, desc.Height as f32);
+            // SAFETY: the title's rectangles for the plane's first resource.
+            let source = unsafe { plane.source.as_ref() }.map_or([0.0, 0.0, 1.0, 1.0], |r| {
+                [r[0] as f32 / width, r[1] as f32 / height, r[2] as f32 / width, r[3] as f32 / height]
+            });
+            // SAFETY: as above.
+            let screen = unsafe { plane.screen.as_ref() }.copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
+            layers.push(crate::compose::Layer { texture, state, source, screen });
+            presented.push((resource, state));
+        }
+        let shown = host.present(&layers, frame);
+        for &(resource, state) in &presented {
+            crate::resource::host_transition(resource, state);
+        }
         #[cfg(feature = "diagnostics")]
-        blinks(frame, resource, state, shown);
+        if let Some(&(resource, state)) = presented.first() {
+            blinks(frame, resource, state, shown);
+        }
         #[cfg(not(feature = "diagnostics"))]
         let _ = shown;
     }
