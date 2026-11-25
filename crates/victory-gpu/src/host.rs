@@ -2278,7 +2278,7 @@ impl Host {
 
 /// The swap chain formats a presented texture can be copied into: its own
 /// family's.
-fn swap_format(format: DXGI_FORMAT) -> Option<DXGI_FORMAT> {
+pub(crate) fn swap_format(format: DXGI_FORMAT) -> Option<DXGI_FORMAT> {
     Some(match format.0 {
         27..=32 => DXGI_FORMAT_R8G8B8A8_UNORM,
         87 | 90 | 91 => DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -2294,6 +2294,9 @@ const BUFFERS: u32 = 2;
 struct Presentation {
     presenter: Option<Presenter>,
     retry: SwapChainRetry,
+    /// Made with the first frame of several planes; None inside if it
+    /// could not be made.
+    composer: Option<Option<crate::compose::Composer>>,
 }
 
 #[derive(Default)]
@@ -2469,16 +2472,51 @@ impl Host {
     /// Shows `texture`, which is in `state` (a host state) and stays in it,
     /// as frame `frame` (saved if captures are on). `None` if nothing was
     /// shown; else, in diagnostics builds, whether the frame was black.
-    pub(crate) fn present(&self, texture: &ID3D12Resource, state: u32, frame: u64) -> Option<bool> {
+    /// Shows `layers` (the title's planes, bottom first): one plane is
+    /// copied as it is, several are put together first.
+    pub(crate) fn present(&self, layers: &[crate::compose::Layer], frame: u64) -> Option<bool> {
+        let first = layers.first()?;
         // SAFETY: a live resource.
-        let desc = unsafe { texture.GetDesc() };
+        let desc = unsafe { first.texture.GetDesc() };
         let Some(format) = swap_format(desc.Format) else {
             tracing::warn!(format = desc.Format.0, "cannot present this format");
             return None;
         };
-        let (width, height) = (desc.Width as u32, desc.Height);
         let mut presentation = self.presenter.lock().unwrap_or_else(|e| e.into_inner());
-        let Presentation { presenter, retry } = &mut *presentation;
+        let presentation = &mut *presentation;
+        let composer = if layers.len() > 1 {
+            let made = presentation.composer.get_or_insert_with(|| {
+                crate::compose::Composer::new(&self.device)
+                    .inspect_err(|e| tracing::warn!(error = %e, "no plane composer: only the first plane shown"))
+                    .ok()
+            });
+            made.as_mut()
+        } else {
+            None
+        };
+        let (texture, state, width, height) = match composer {
+            Some(c) => {
+                // The largest plane's size.
+                let (width, height) = layers
+                    .iter()
+                    // SAFETY: live resources.
+                    .map(|l| unsafe { l.texture.GetDesc() })
+                    .map(|d| (d.Width as u32, d.Height))
+                    .max_by_key(|&(w, h)| u64::from(w) * u64::from(h))?;
+                let output = match c.output(&self.device, width, height, format) {
+                    Ok(t) => t.clone(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, width, height, "no texture to put the planes together in");
+                        return None;
+                    }
+                };
+                (output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS.0 as u32, width, height)
+            }
+            None => (first.texture.clone(), first.state, desc.Width as u32, desc.Height),
+        };
+        let texture = &texture;
+        let Presentation { presenter, retry, composer } = presentation;
+        let composer = composer.as_ref().and_then(Option::as_ref).filter(|_| layers.len() > 1);
         if presenter.is_none() {
             *presenter = match retry
                 .attempt(Instant::now(), || self.presenter(width, height, format))?
@@ -2520,6 +2558,9 @@ impl Host {
                 return None;
             };
             p.copy.reset();
+            if let Some(c) = composer {
+                c.record(&self.device, &p.copy, layers);
+            }
             let list = &p.copy.list;
             list.ResourceBarrier(&[
                 transition(texture, state, D3D12_RESOURCE_STATE_COPY_SOURCE),
