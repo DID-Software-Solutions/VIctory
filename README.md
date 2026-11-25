@@ -23,6 +23,13 @@ loads the world and shows it: slowly, and with rendering defects.
 
 Tested on one machine: Windows 11, AMD RX 6700 XT.
 
+NVIDIA GPUs cap shader-visible view heaps at 10^6 slots, and the world uses
+more (slot 1,236,191 and up). On such a GPU, shaders read the slots past the
+cap as empty instead of faulting the device (until 2026-11-25 the run ended
+with "device removed", DXGI_ERROR_INVALID_CALL). Expect missing or wrong
+objects. The shader cache is kept per heap size, so run `translate --cache`
+again after switching GPUs.
+
 > **Warning.** Entering the world on a real GPU has hung it in earlier
 > builds, and Windows then resets the display driver (every monitor goes
 > black for a moment). The latest runs did not, but it is not ruled out; a
