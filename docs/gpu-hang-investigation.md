@@ -64,8 +64,17 @@ growth trend and under 45% of capacity. A leak that the emulator causes would sh
 steady growth. Exhausting the pool from there in one frame is unlikely; a corrupted
 head index (see the bit flip above) would also hit this trap.
 
+**Title AV at frame 6942 (manual run, open).** A long manual run (the title's crash
+report says `Xbox Series X`) faulted at victory-image+0x7b61a7, reading 0x8. The
+code is `mov (%rdi),%r15; call *0x8(%r15)`: a virtual call on the object at
+0x6ca4e1220, whose first qword (its vtable) is 0. The object was freed, zeroed or
+never set up. This is a different site from the two crashes above, and no flipped bit
+shows in the registers. One crash so far does not tell a title bug from the emulator
+writing over title memory. The next step is to find what writes zeros there.
+
 Runs past the old hang point: vaddr1 (int3, 1699), final1 (AV, 1797), vaddrS (none,
-1929), pool1 (none, 1928).
+1929), pool1 (none, 1928), finalS (none, 1937, Series S, 400 s, clean HEAD), manual
+(AV, 6942).
 
 ## Series S
 - The old exit-139 segfault does not reproduce (`run --console series-s`).
