@@ -29,9 +29,52 @@ Every unfixed run hung between frames 1340 and 1603.
   logged one first-chance AV in nvwgf2umx.dll+0x122db1c (read 0x0); the title
   survived it.
 
-## New crashes past the old hang point (open)
-These are separate from the hang and not yet triaged: the title int3s, and the driver
-AV. Neither run produced DRED data, and the victory.exe frames are not symbolized.
+## New crashes past the old hang point (triaged: not reproduced, no emulator fault found)
+Neither crash repeats, and neither points at emulator code.
+
+**Driver AV at frame 1797 (final1).** The stack runs from `pipeline::library::pipeline`
+(the `create()` call, library.rs) through D3D12Core into nvwgf2umx.dll, on a pipeline
+worker making a mesh pipeline.
+- It executed 0x77fc4bd42980. nvwgf2umx.dll was mapped at 0x7ffc4bb70000 that boot
+  (same boot as the run). 0x7ffc4bd42980 is nvwgf2umx+0x1d2980.
+- The bad target differs from that valid driver address in exactly one bit (bit 43).
+  A single flipped bit in a code pointer is the mark of a memory or CPU error, not of a
+  bad pipeline description. No WHEA event was logged, which non-ECC RAM would not
+  report anyway.
+- Making every one of the title's 28164 pack pipelines offline (`translate --cache
+  --pipelines`) did not crash. The first pass stalled with 3 jobs for over 4 minutes
+  until its timeout. A rerun made the remaining 1098 jobs, those 3 included, in 40 s.
+  So the stall did not repeat.
+- Suggested check on this host: a memory test, and stock CPU/RAM settings if any
+  overclock or curve offset is set.
+
+**Title int3 at frame 1699 (vaddr1).** victory-image+0x5149aec is the fatal trap of a
+lock-free pool allocator. It fires when the free list is empty (head index 0x1fffe) or
+the pool has no storage. The function picks one of two pools by a type byte:
+| pool (title global) | entry | capacity |
+|---|---|---|
+| 0x14a9ec938 | 0xe0 bytes | 22500 |
+| 0x14abbe2e8 | 0x110 bytes | 27500 |
+
+Pool header: +0x0 storage, +0x8 entry size, +0xc capacity, +0x10 live count, +0x20 free
+head, +0x28 links. A run polled both pools every 2 s (pool1, Series X, 480 s). It
+reached frame 1928 with no crash. Pool A peaked at 9714 live entries and pool B
+at 4901. Both rose and fell with the scene and leveled off at the end, with no
+growth trend and under 45% of capacity. A leak that the emulator causes would show as
+steady growth. Exhausting the pool from there in one frame is unlikely; a corrupted
+head index (see the bit flip above) would also hit this trap.
+
+**Title AV at frame 6942 (manual run, open).** A long manual run (the title's crash
+report says `Xbox Series X`) faulted at victory-image+0x7b61a7, reading 0x8. The
+code is `mov (%rdi),%r15; call *0x8(%r15)`: a virtual call on the object at
+0x6ca4e1220, whose first qword (its vtable) is 0. The object was freed, zeroed or
+never set up. This is a different site from the two crashes above, and no flipped bit
+shows in the registers. One crash so far does not tell a title bug from the emulator
+writing over title memory. The next step is to find what writes zeros there.
+
+Runs past the old hang point: vaddr1 (int3, 1699), final1 (AV, 1797), vaddrS (none,
+1929), pool1 (none, 1928), finalS (none, 1937, Series S, 400 s, clean HEAD), manual
+(AV, 6942).
 
 ## Series S
 - The old exit-139 segfault does not reproduce (`run --console series-s`).
